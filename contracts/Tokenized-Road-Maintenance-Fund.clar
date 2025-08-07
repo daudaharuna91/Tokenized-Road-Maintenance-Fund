@@ -9,6 +9,14 @@
 (define-constant ERR-ALREADY-EXECUTED (err u107))
 (define-constant ERR-NOT-DAO-MEMBER (err u108))
 
+(define-constant ERR-EMERGENCY-NOT-FOUND (err u110))
+(define-constant ERR-EMERGENCY-EXPIRED (err u111))
+(define-constant ERR-ALREADY-CONFIRMED (err u112))
+(define-constant ERR-INSUFFICIENT-CONFIRMATIONS (err u113))
+(define-constant ERR-EMERGENCY-LIMIT-EXCEEDED (err u114))
+
+(define-data-var emergency-count uint u0)
+
 (define-data-var fund-balance uint u0)
 (define-data-var proposal-count uint u0)
 (define-data-var dao-member-count uint u0)
@@ -176,3 +184,92 @@
 
 (map-set dao-members CONTRACT-OWNER true)
 (var-set dao-member-count u1)
+
+
+(define-map emergency-withdrawals
+  uint
+  {
+    initiator: principal,
+    recipient: principal,
+    amount: uint,
+    reason: (string-ascii 200),
+    confirmations: uint,
+    deadline: uint,
+    executed: bool
+  }
+)
+
+(define-map emergency-confirmations { emergency-id: uint, confirmer: principal } bool)
+
+(define-public (initiate-emergency-withdrawal (recipient principal) (amount uint) (reason (string-ascii 200)))
+  (let 
+    (
+      (emergency-id (+ (var-get emergency-count) u1))
+      (max-emergency-amount (/ (var-get fund-balance) u10))
+      (deadline (+ stacks-block-height u144))
+    )
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (<= amount max-emergency-amount) ERR-EMERGENCY-LIMIT-EXCEEDED)
+    (asserts! (<= amount (var-get fund-balance)) ERR-INSUFFICIENT-FUNDS)
+    
+    (map-set emergency-withdrawals emergency-id {
+      initiator: tx-sender,
+      recipient: recipient,
+      amount: amount,
+      reason: reason,
+      confirmations: u0,
+      deadline: deadline,
+      executed: false
+    })
+    (var-set emergency-count emergency-id)
+    (ok emergency-id)
+  )
+)
+
+(define-public (confirm-emergency (emergency-id uint))
+  (let 
+    (
+      (emergency (unwrap! (map-get? emergency-withdrawals emergency-id) ERR-EMERGENCY-NOT-FOUND))
+      (confirmation-key { emergency-id: emergency-id, confirmer: tx-sender })
+    )
+    (asserts! (default-to false (map-get? dao-members tx-sender)) ERR-NOT-DAO-MEMBER)
+    (asserts! (< stacks-block-height (get deadline emergency)) ERR-EMERGENCY-EXPIRED)
+    (asserts! (is-none (map-get? emergency-confirmations confirmation-key)) ERR-ALREADY-CONFIRMED)
+    
+    (map-set emergency-confirmations confirmation-key true)
+    (map-set emergency-withdrawals emergency-id 
+      (merge emergency { confirmations: (+ (get confirmations emergency) u1) }))
+    (ok true)
+  )
+)
+
+(define-public (execute-emergency (emergency-id uint))
+  (let 
+    (
+      (emergency (unwrap! (map-get? emergency-withdrawals emergency-id) ERR-EMERGENCY-NOT-FOUND))
+      (required-confirmations (/ (var-get dao-member-count) u3))
+    )
+    (asserts! (< stacks-block-height (get deadline emergency)) ERR-EMERGENCY-EXPIRED)
+    (asserts! (not (get executed emergency)) ERR-ALREADY-EXECUTED)
+    (asserts! (>= (get confirmations emergency) required-confirmations) ERR-INSUFFICIENT-CONFIRMATIONS)
+    (asserts! (>= (var-get fund-balance) (get amount emergency)) ERR-INSUFFICIENT-FUNDS)
+    
+    (try! (as-contract (stx-transfer? (get amount emergency) tx-sender (get recipient emergency))))
+    (var-set fund-balance (- (var-get fund-balance) (get amount emergency)))
+    (map-set emergency-withdrawals emergency-id (merge emergency { executed: true }))
+    (ok true)
+  )
+)
+
+(define-read-only (get-emergency (emergency-id uint))
+  (map-get? emergency-withdrawals emergency-id)
+)
+
+(define-read-only (get-emergency-count)
+  (var-get emergency-count)
+)
+
+(define-read-only (has-confirmed-emergency (emergency-id uint) (confirmer principal))
+  (is-some (map-get? emergency-confirmations { emergency-id: emergency-id, confirmer: confirmer }))
+)
