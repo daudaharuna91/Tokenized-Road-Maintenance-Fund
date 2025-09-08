@@ -15,6 +15,14 @@
 (define-constant ERR-INSUFFICIENT-CONFIRMATIONS (err u113))
 (define-constant ERR-EMERGENCY-LIMIT-EXCEEDED (err u114))
 
+(define-constant ERR-NO-REWARDS-AVAILABLE (err u120))
+(define-constant ERR-MILESTONE-NOT-REACHED (err u121))
+(define-constant ERR-REWARDS-ALREADY-CLAIMED (err u122))
+
+(define-data-var current-milestone uint u0)
+(define-data-var reward-pool uint u0)
+(define-data-var milestone-threshold uint u10000000)
+
 (define-data-var emergency-count uint u0)
 
 (define-data-var fund-balance uint u0)
@@ -272,4 +280,85 @@
 
 (define-read-only (has-confirmed-emergency (emergency-id uint) (confirmer principal))
   (is-some (map-get? emergency-confirmations { emergency-id: emergency-id, confirmer: confirmer }))
+)
+
+
+(define-map milestone-rewards
+  { milestone: uint, contributor: principal }
+  { amount: uint, claimed: bool }
+)
+
+(define-map contributor-milestone-eligibility principal uint)
+
+(define-public (check-and-distribute-milestone)
+  (let
+    (
+      (current-balance (var-get fund-balance))
+      (current-milestone-num (var-get current-milestone))
+      (threshold (* (var-get milestone-threshold) (+ current-milestone-num u1)))
+    )
+    (if (>= current-balance threshold)
+      (begin
+        (var-set current-milestone (+ current-milestone-num u1))
+        (var-set reward-pool (+ (var-get reward-pool) (/ threshold u20)))
+        (ok (var-get current-milestone))
+      )
+      (ok u0)
+    )
+  )
+)
+
+(define-public (calculate-contributor-reward (contributor principal))
+  (let
+    (
+      (contribution (default-to u0 (map-get? contributors contributor)))
+      (total-fund (var-get fund-balance))
+      (available-rewards (var-get reward-pool))
+      (milestone-num (var-get current-milestone))
+      (eligible-milestone (default-to u0 (map-get? contributor-milestone-eligibility contributor)))
+    )
+    (if (and (> milestone-num eligible-milestone) (> contribution u0) (> available-rewards u0))
+      (let
+        (
+          (reward-amount (/ (* available-rewards contribution) total-fund))
+        )
+        (map-set milestone-rewards 
+          { milestone: milestone-num, contributor: contributor }
+          { amount: reward-amount, claimed: false }
+        )
+        (map-set contributor-milestone-eligibility contributor milestone-num)
+        (ok reward-amount)
+      )
+      (ok u0)
+    )
+  )
+)
+
+(define-public (claim-milestone-reward (milestone uint))
+  (let
+    (
+      (reward-key { milestone: milestone, contributor: tx-sender })
+      (reward-data (unwrap! (map-get? milestone-rewards reward-key) ERR-NO-REWARDS-AVAILABLE))
+    )
+    (asserts! (not (get claimed reward-data)) ERR-REWARDS-ALREADY-CLAIMED)
+    (asserts! (<= milestone (var-get current-milestone)) ERR-MILESTONE-NOT-REACHED)
+    (asserts! (>= (var-get reward-pool) (get amount reward-data)) ERR-INSUFFICIENT-FUNDS)
+    
+    (try! (as-contract (stx-transfer? (get amount reward-data) tx-sender tx-sender)))
+    (var-set reward-pool (- (var-get reward-pool) (get amount reward-data)))
+    (map-set milestone-rewards reward-key (merge reward-data { claimed: true }))
+    (ok (get amount reward-data))
+  )
+)
+
+(define-read-only (get-milestone-status)
+  {
+    current-milestone: (var-get current-milestone),
+    reward-pool: (var-get reward-pool),
+    next-threshold: (* (var-get milestone-threshold) (+ (var-get current-milestone) u1))
+  }
+)
+
+(define-read-only (get-contributor-reward-info (contributor principal) (milestone uint))
+  (map-get? milestone-rewards { milestone: milestone, contributor: contributor })
 )
