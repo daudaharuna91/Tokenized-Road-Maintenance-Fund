@@ -19,6 +19,10 @@
 (define-constant ERR-MILESTONE-NOT-REACHED (err u121))
 (define-constant ERR-REWARDS-ALREADY-CLAIMED (err u122))
 
+(define-constant ERR-CANNOT-DELEGATE-TO-SELF (err u130))
+(define-constant ERR-DELEGATE-NOT-DAO-MEMBER (err u131))
+(define-constant ERR-NO-ACTIVE-DELEGATION (err u132))
+
 (define-data-var current-milestone uint u0)
 (define-data-var reward-pool uint u0)
 (define-data-var milestone-threshold uint u10000000)
@@ -95,6 +99,7 @@
     (
       (proposal (unwrap! (map-get? proposals proposal-id) ERR-PROPOSAL-NOT-FOUND))
       (vote-key { proposal-id: proposal-id, voter: tx-sender })
+      (voter-power (get-voting-power tx-sender))
     )
     (asserts! (default-to false (map-get? dao-members tx-sender)) ERR-NOT-DAO-MEMBER)
     (asserts! (is-none (map-get? votes vote-key)) ERR-ALREADY-VOTED)
@@ -102,8 +107,8 @@
     
     (map-set votes vote-key true)
     (if vote-for
-      (map-set proposals proposal-id (merge proposal { votes-for: (+ (get votes-for proposal) u1) }))
-      (map-set proposals proposal-id (merge proposal { votes-against: (+ (get votes-against proposal) u1) }))
+      (map-set proposals proposal-id (merge proposal { votes-for: (+ (get votes-for proposal) voter-power) }))
+      (map-set proposals proposal-id (merge proposal { votes-against: (+ (get votes-against proposal) voter-power) }))
     )
     (ok true)
   )
@@ -157,12 +162,7 @@
   (is-some (map-get? votes { proposal-id: proposal-id, voter: voter }))
 )
 
-(define-read-only (get-voting-power (member principal))
-  (if (default-to false (map-get? dao-members member))
-    u1
-    u0
-  )
-)
+
 
 (define-read-only (is-proposal-approved (proposal-id uint))
   (match (map-get? proposals proposal-id)
@@ -361,4 +361,55 @@
 
 (define-read-only (get-contributor-reward-info (contributor principal) (milestone uint))
   (map-get? milestone-rewards { milestone: milestone, contributor: contributor })
+)
+
+(define-map delegations principal principal)
+(define-map delegation-power principal uint)
+
+(define-public (delegate-voting-power (delegate principal))
+  (begin
+    (asserts! (default-to false (map-get? dao-members tx-sender)) ERR-NOT-DAO-MEMBER)
+    (asserts! (default-to false (map-get? dao-members delegate)) ERR-DELEGATE-NOT-DAO-MEMBER)
+    (asserts! (not (is-eq tx-sender delegate)) ERR-CANNOT-DELEGATE-TO-SELF)
+    
+    (match (map-get? delegations tx-sender)
+      old-delegate 
+      (map-set delegation-power old-delegate 
+        (- (default-to u1 (map-get? delegation-power old-delegate)) u1))
+      true
+    )
+    
+    (map-set delegations tx-sender delegate)
+    (map-set delegation-power delegate 
+      (+ (default-to u1 (map-get? delegation-power delegate)) u1))
+    (ok true)
+  )
+)
+
+(define-public (revoke-delegation)
+  (let
+    (
+      (current-delegate (unwrap! (map-get? delegations tx-sender) ERR-NO-ACTIVE-DELEGATION))
+    )
+    (map-delete delegations tx-sender)
+    (map-set delegation-power current-delegate 
+      (- (default-to u1 (map-get? delegation-power current-delegate)) u1))
+    (ok true)
+  )
+)
+
+(define-read-only (get-voting-power (member principal))
+  (if (default-to false (map-get? dao-members member))
+    (default-to u1 (map-get? delegation-power member))
+    u0
+  )
+)
+
+(define-read-only (get-delegated-power (member principal))
+  {
+    base-power: (if (default-to false (map-get? dao-members member)) u1 u0),
+    delegated-power: (default-to u0 (map-get? delegation-power member)),
+    total-power: (get-voting-power member),
+    current-delegate: (map-get? delegations member)
+  }
 )
