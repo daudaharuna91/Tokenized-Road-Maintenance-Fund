@@ -23,6 +23,10 @@
 (define-constant ERR-DELEGATE-NOT-DAO-MEMBER (err u131))
 (define-constant ERR-NO-ACTIVE-DELEGATION (err u132))
 
+(define-constant ERR-AMENDMENT-WINDOW-CLOSED (err u140))
+(define-constant ERR-NOT-PROPOSER (err u141))
+(define-constant ERR-AMENDMENT-LIMIT-REACHED (err u142))
+
 (define-data-var current-milestone uint u0)
 (define-data-var reward-pool uint u0)
 (define-data-var milestone-threshold uint u10000000)
@@ -45,7 +49,8 @@
     votes-for: uint,
     votes-against: uint,
     voting-deadline: uint,
-    executed: bool
+    executed: bool,
+    amendment-count: uint
   }
 )
 (define-map votes { proposal-id: uint, voter: principal } bool)
@@ -87,7 +92,8 @@
       votes-for: u0,
       votes-against: u0,
       voting-deadline: deadline,
-      executed: false
+      executed: false,
+      amendment-count: u0
     })
     (var-set proposal-count proposal-id)
     (ok proposal-id)
@@ -412,4 +418,69 @@
     total-power: (get-voting-power member),
     current-delegate: (map-get? delegations member)
   }
+)
+
+(define-map vote-versions { proposal-id: uint, voter: principal } uint)
+
+(define-public (amend-proposal (proposal-id uint) (new-recipient (optional principal)) (new-amount (optional uint)) (new-description (optional (string-ascii 500))))
+  (let
+    (
+      (proposal (unwrap! (map-get? proposals proposal-id) ERR-PROPOSAL-NOT-FOUND))
+      (amendment-window (- (get voting-deadline proposal) u720))
+      (current-amendments (get amendment-count proposal))
+      (updated-recipient (default-to (get recipient proposal) new-recipient))
+      (updated-amount (default-to (get amount proposal) new-amount))
+      (updated-description (default-to (get description proposal) new-description))
+    )
+    (asserts! (is-eq tx-sender (get proposer proposal)) ERR-NOT-PROPOSER)
+    (asserts! (not (get executed proposal)) ERR-ALREADY-EXECUTED)
+    (asserts! (< stacks-block-height amendment-window) ERR-AMENDMENT-WINDOW-CLOSED)
+    (asserts! (< current-amendments u3) ERR-AMENDMENT-LIMIT-REACHED)
+    (asserts! (> updated-amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (<= updated-amount (var-get fund-balance)) ERR-INSUFFICIENT-FUNDS)
+    
+    (map-set proposals proposal-id (merge proposal {
+      recipient: updated-recipient,
+      amount: updated-amount,
+      description: updated-description,
+      votes-for: u0,
+      votes-against: u0,
+      amendment-count: (+ current-amendments u1)
+    }))
+    (ok true)
+  )
+)
+
+(define-read-only (can-amend-proposal (proposal-id uint))
+  (match (map-get? proposals proposal-id)
+    proposal
+    (let
+      (
+        (amendment-window (- (get voting-deadline proposal) u720))
+        (current-amendments (get amendment-count proposal))
+      )
+      {
+        can-amend: (and 
+          (< stacks-block-height amendment-window)
+          (not (get executed proposal))
+          (< current-amendments u3)
+        ),
+        remaining-amendments: (- u3 current-amendments),
+        amendment-deadline: amendment-window
+      }
+    )
+    { can-amend: false, remaining-amendments: u0, amendment-deadline: u0 }
+  )
+)
+
+(define-read-only (get-amendment-info (proposal-id uint))
+  (match (map-get? proposals proposal-id)
+    proposal
+    {
+      amendment-count: (get amendment-count proposal),
+      max-amendments: u3,
+      amendments-remaining: (- u3 (get amendment-count proposal))
+    }
+    { amendment-count: u0, max-amendments: u3, amendments-remaining: u0 }
+  )
 )
